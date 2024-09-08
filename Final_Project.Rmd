@@ -1,0 +1,384 @@
+---
+title: "The Effect of Social Vulnerability on Pollution in Charlotte, NC"
+author: "Camille Robertson"
+date: "2023-12-04"
+output: html_document
+bibliography: references.bib
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r pacmanlib, include=FALSE}
+pacman::p_load(sf,
+               tidyverse,
+               tidycensus,
+               tigris,
+               osmdata,
+               terra,
+               tidyterra,
+               psych,
+               plotrix,
+               factoextra,
+               cluster,
+               gt
+               )
+```
+
+## Introduction
+
+The Civil Rights Act of 1964 marks the end of segregation in the United States. However, the generational impact of discriminatory policies and practices implemented by hegemonic influence lingers in the present day. Disadvantaged groups experiencing social and economic barriers as a result of oppression may also be vulnerable to further environmental and health hazards. A study done by Dr. Benjamin Chavis found that "race was the most powerful explanatory factor for where toxic facilities were located across the country," which led to the implementation of environmental justice [@bullard2019addressing]. Major sources of pollution derive from industrial emissions, toxic facilities, and landfills; the employment of segregation between communities with differing socioeconomic factors causes disproportionate exposure to potential pollutants and health risks [@perlin2001]. As a result, analysis has turned towards the socially vulnerable populations who may bear the burden of environmental harm exacerbated by the evolving state of the earth's climate.
+
+Given Charlotte's history of preferential development and urban renewal plans leading to neighborhoods divided among race and class in the present day, it is imperative to analyze how such environmental risks may be augmented by segregation [@houck2023]. The objective focuses on the research question: how does race, class, and other socioeconomic indicators affect the rates of exposure to various forms of air pollution? This study hypothesizes that socially vulnerable populations in Charlotte, NC will be exposed to higher levels of air pollution putting their health at risk.
+
+## Materials and Methods
+
+To characterize the social vulnerability experienced in Charlotte, NC, data is extracted from the U.S. American Community Survey 5-Year Estimates \-- an extension of the U.S. Census with more demographic information. Using the census tract as the unit of spatial measurement in the Charlotte-Mecklenburg County area, fourteen demographic variables are derived: racial minority status, below 150 percent poverty level, population over 25 years old with no high school diploma, population over 16 years old that are unemployed, civilian noninstitutionalized with no health insurance, over 65 years old, under 17 years old, civilian noninstitutionalized with a disability status, limited English proficiency, workers over 16 years old with no vehicle available, renter-occupied housing units, no internet access, use of cash public assistance or food stamps, and the Gini index for income inequality. Each variable chosen is a contributing indicator of "potential negative effects on communities," influenced by factors of the CDC/ATSDR Social Vulnerability Index (SVI) [@cdc]. Then, the percentage of each variable was taken out of the total population or total number of housing units.
+
+```{r getcensus, include=FALSE}
+meck_pop <- get_acs(
+  geography = "tract",
+  variables = c(total_pop = "B01001_001",
+                total_housing = "DP04_0045",
+                white_only = "B02001_002",
+                below_100_pov = "B06012_002",
+                pov_100_149 = "B06012_003",
+                no_high_school = "B16010_002",
+                unemployed = "DP03_0005",
+                no_insurance = "DP03_0099",
+                age_65_74 = "B06001_011",
+                over_75 = "B06001_012",
+                under_5 = "B06001_002",
+                age_5_17 = "B06001_003",
+                with_disability = "S1810_C02_001",
+                spanish_english = "B06007_005",
+                other_english = "B06007_008",
+                no_vehicle = "B08014_002",
+                renter_occupied = "DP04_0047",
+                no_internet = "B28002_013",
+                food_stamps = "B19058_002",
+                gini_index = "B19083_001"),
+  year = 2021,
+  output = "wide",
+  state = "NC",
+  county = "Mecklenburg",
+  geometry = TRUE
+)
+```
+
+```{r cleancensus, include=FALSE}
+clean_meck <- meck_pop %>% 
+  mutate(pct_minority = (total_popE - white_onlyE)/total_popE * 100,
+         pct_150_poverty = (below_100_povE + pov_100_149E)/total_popE * 100,
+         pct_no_high_sch = no_high_schoolE/total_popE * 100,
+         pct_unemployed = unemployedE/total_popE * 100,
+         pct_no_insurance = no_insuranceE/total_popE * 100,
+         pct_over65 = (age_65_74E + over_75E)/total_popE * 100,
+         pct_under17 = (under_5E + age_5_17E)/total_popE * 100,
+         pct_disability = with_disabilityE/total_popE * 100,
+         pct_eng_prof = (spanish_englishE + other_englishE)/total_popE * 100,
+         pct_no_vehicle = no_vehicleE/total_popE * 100,
+         pct_renter = renter_occupiedE/total_housingE * 100,
+         pct_no_internet = no_internetE/total_housingE * 100,
+         pct_food_stamps = food_stampsE/total_housingE * 100,
+         pct_gini = gini_indexE * 100) %>% 
+  select(GEOID, starts_with("pct")) %>% 
+  filter(!is.na(pct_gini))
+
+meck_df <- clean_meck %>% 
+  as.data.frame() %>% 
+  select(1:15)
+```
+
+Representing environmental risks are three forms of major pollutants: landfills, solid waste facilities, and industrial factories. Locations for landfills and solid waste facilities are accessible from Mecklenburg County GIS where public shapefiles can be downloaded [@landfills2023; @waste2023]. Within the osmdata R package, a query was written to obtain the locations of industrial factories from OpenStreetMap API [@OpenStreetMap]. For each source of pollution, variables were constructed to determine the minimum distance to a landfill, solid waste facility, or industrial factory from each census tract. These census tract distances were combined with the initial census data set, presenting a total of seventeen variables to characterize the social and environmental vulnerability of each census tract. Each determinant is shown in Figure 1 through distribution plots after being scaled through Z-score normalization. The demographic and environmental variables were utilized to form geodemographic clusters based on census tract. The K-means clustering method was implemented to form seven clusters upon which to form analysis with each air pollution measurement. Characterizing each cluster based on the demographics of its center, a heat map was created to determine the most important identifiers denoting social vulnerability.
+
+```{r getlandfills, include=FALSE}
+meck_landfills <- st_read("Datasets/Landfills/Landfills.shp")
+meck_landfills <- meck_landfills %>% 
+  st_transform(crs = st_crs(clean_meck)) %>% 
+  filter(STATUS_1 == "Open")
+```
+
+```{r landfilldist, include=FALSE}
+lf_dist <- st_distance(clean_meck, meck_landfills) %>% 
+  as.data.frame()
+lf_dist$min <- apply(lf_dist, 1, FUN = min)
+
+clean_meck$landfill_dist <- lf_dist$min
+meck_df$landfill_dist <- lf_dist$min
+```
+
+```{r getwaste, include=FALSE}
+meck_waste <- st_read("Datasets/Solidwaste_Facility/Solidwaste_Facility.shp")
+meck_waste <- meck_waste %>% 
+  st_transform(crs = st_crs(clean_meck))
+```
+
+```{r wastedist, include=FALSE}
+wf_dist <- st_distance(clean_meck, meck_waste) %>% 
+  as.data.frame()
+wf_dist$min <- apply(wf_dist, 1, FUN = min)
+
+clean_meck$waste_dist <- wf_dist$min
+meck_df$waste_dist <- wf_dist$min
+```
+
+```{r osmplant, include=FALSE}
+osmquery <- opq(bbox = "Charlotte, NC") %>%
+  add_osm_feature(key = "man_made",
+                  value = "works")
+
+osmfactory <- osmdata_sf(osmquery)
+osmfactory
+```
+
+```{r transformcrs, include=FALSE}
+osmfactory$osm_polygons <- osmfactory$osm_polygons %>% 
+  st_transform(crs = st_crs(clean_meck))
+```
+
+```{r factorydist, include=FALSE}
+fac_dist <- st_distance(clean_meck, osmfactory$osm_polygons) %>% 
+  as.data.frame()
+fac_dist$min <- apply(fac_dist, 1, FUN = min)
+
+clean_meck$factory_dist <- fac_dist$min
+meck_df$factory_dist <- fac_dist$min
+```
+
+```{r scaledf, include=FALSE}
+meck_scaled <- meck_df %>% 
+  select(-"GEOID") %>% 
+  scale() %>% 
+  as.data.frame()
+```
+
+```{r densityplot, echo=FALSE}
+meck_scaled_longer <- meck_scaled %>% 
+  pivot_longer(everything())
+
+ggplot(data = meck_scaled_longer) +
+  geom_density(aes(x = value), linewidth = 0.4) +
+  facet_wrap(~ name) +
+  theme_bw() +
+  theme(strip.background = element_rect(linewidth = 0.8,
+                                        fill = "white")) +
+  labs(title = "Figure 1: Distribution Plots by Variable",
+       x = "Value",
+       y = "Density")
+```
+
+```{r corr, include=FALSE}
+# check for multicollinearity
+pairs.panels(meck_scaled)
+```
+
+```{r num, include=FALSE}
+meck_scaled %>% 
+  fviz_nbclust(kmeans, method = "wss", k.max = 20)
+```
+
+To measure the air pollution, data sets were used from NASA Socioeconomic Data and Applications Center (SEDAC) where annual mean concentrations of NO2, O3, and PM2.5 had been collected for public service. Nitrogen Dioxide (NO2) is a molecule that contributes to particle pollution [@NASA_NO2]. Ozone (O3) is a gas molecule harmful in high amounts [@NASA_O3]. Particulate matter at 2.5 micrometers in diameter (PM2.5) is a fine particle with high health risks [@NASA_PM]. Each file contained 1-km grid raster maps for the entire United States which then had to be filtered for Mecklenburg County. Using the terra R package, the concentrations were aggregated by census tract and averaged to obtain a measurement for the main data set. Then each concentration was used for density plots of each cluster for comparison. In order to gain an overall calculation of the air pollution measurements, an index was produced using the summation of percentile rankings of each NO2, O3, and PM2.5 concentration; this pollution index was also visualized using density plots by cluster for comparison.
+
+```{r getno2, include=FALSE}
+no2 <- rast("Datasets/Annual_NO2/NO2_Annual_2016.tif")
+clean_meck <- clean_meck %>% 
+  st_transform(crs = crs(no2))
+meck_no2 <- crop(no2, clean_meck, mask = TRUE)
+```
+
+```{r geto3, include=FALSE}
+o3 <- rast("Datasets/Annual_O3/O3_Annual_2016.tif")
+meck_o3 <- crop(o3, clean_meck, mask = TRUE)
+```
+
+```{r getpm, include=FALSE}
+pm2_5 <- rast("Datasets/Annual_PM2-5/Annual_2016.tif")
+meck_pm2_5 <- crop(pm2_5, clean_meck, mask = TRUE)
+```
+
+```{r extract, include=FALSE}
+no2_tracts <- terra::extract(no2, clean_meck, fun = mean)
+clean_meck$avg_no2 <- no2_tracts$NO2_Annual_2016
+
+o3_tracts <- terra::extract(o3, clean_meck, fun = mean)
+clean_meck$avg_o3 <- o3_tracts$O3_Annual_2016
+
+pm2_5_tracts <- terra::extract(pm2_5, clean_meck, fun = mean)
+clean_meck$avg_pm2_5 <- pm2_5_tracts$Annual_2016
+```
+
+```{r index, include=FALSE}
+clean_meck <- clean_meck %>% 
+  mutate(no2_rank = percent_rank(avg_no2),
+         o3_rank = percent_rank(avg_o3),
+         pm2_5_rank = percent_rank(avg_pm2_5),
+         pollut_rank = no2_rank + o3_rank + pm2_5_rank,
+         pollut_index = percent_rank(pollut_rank))
+```
+
+## Results
+
+The K-means clustering algorithm resulted in seven distinctive clusters visualized on a map in Figure 2; each cluster containing multiple census tracts with cluster 4 having the least at 23 tracts and cluster 3 having the most with 66. Once the differences from the global mean were calculated for the cluster centers, a heat map shown in Figure 3 was applied to form cluster identities.
+
+```{r cluster, include=FALSE}
+set.seed(9270)
+clust_kmeans <- meck_scaled %>% 
+  kmeans(centers = 7,
+         nstart = 25)
+
+table(clust_kmeans$cluster)
+```
+
+```{r clustermap, echo=FALSE}
+clean_meck$cluster <- factor(clust_kmeans$cluster)
+
+ggplot() +
+  geom_sf(data = clean_meck,
+          aes(fill = cluster),
+          lwd = 0.1) +
+  theme_void() +
+  labs(title = "Figure 2: Census Tracts by Cluster",
+       fill = "Cluster ID") +
+  scale_fill_brewer(palette = "YlGnBu")
+```
+
+```{r clustermean, include=FALSE}
+cluster_mean <- as.data.frame(clust_kmeans$centers)
+cluster_mean
+```
+
+```{r globaldiff, include=FALSE}
+global_mean <- colMeans(cluster_mean)
+
+cluster_mean_diff <- cluster_mean
+for(i in 1:nrow(cluster_mean)) {
+  cluster_mean_diff[i,] <- cluster_mean_diff[i,] - global_mean
+}
+```
+
+```{r heatmap, echo=FALSE}
+# add a column that represents cluster IDs
+cluster_mean_diff <- cluster_mean_diff %>%
+  mutate(cluster = as.character(1:7), .before = 1)
+# make it as a long-form data
+cluster_mean_diff_longer <- cluster_mean_diff %>%
+  pivot_longer(-cluster, names_to = "variable")
+# Create a plot
+ggplot(data = cluster_mean_diff_longer,
+       aes(x = cluster, y = variable)) +
+  geom_tile(aes(fill = value)) +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red") +
+  geom_text(aes(label = round(value, 2))) +
+  theme_minimal() +
+  labs(title = "Figure 3: Cluster Identity Heat Map",
+       x = "Cluster ID",
+       y = "Variable",
+       fill = "Value")
+```
+
+Using the highest absolute values as the main identifying factors, the cluster identities are detailed in Table 1. Clusters 4 and 5 represent populations that are most at risk with higher levels of social vulnerability while cluster 2 shows a very low level of social vulnerability.
+
+```{r idtable, echo=FALSE}
+clust_ident <- data.frame(cluster_id = 1:7,
+                          ident_fact = c("Above average unemployment and minority status, but higher vehicle ownership",
+                                         "Very low social vulnerability, higher income inequality, higher retired population",
+                                         "Low income inequality, closer to landfills, farthest from waste facilities",
+                                         "High social vulnerability, less internet access, more food stamps, higher disability rate",
+                                         "High social vulnerability, less English proficiency, less high school graduates, no insurance",
+                                         "High retired population, less renters and minorities, low poverty rate",
+                                         "Renters with no vehicle, very low child and retired population, low disability rate"))
+
+clust_ident %>% 
+  gt() %>% 
+  tab_header("Table 1: Cluster Identity") %>% 
+  cols_label(cluster_id = "Cluster",
+             ident_fact = "Identifying Factors") %>% 
+  cols_align(align = "center", columns = cluster_id)
+```
+
+Focusing on the geodemographic clusters, distribution plots for each of the air pollution concentrations display how pollution affects each cluster. The overall Pollution Index charts a more relative comparison between the census tracts with the highest pollution levels denoted by a high percentile ranking.
+
+```{r no2plot, echo=FALSE}
+ggplot(data = clean_meck) +
+  geom_density(aes(x = avg_no2), linewidth = 0.35) +
+  facet_wrap(~ cluster) +
+  theme_bw() +
+  theme(strip.background = element_rect(linewidth = 0.8,
+                                        fill = "white")) +
+  labs(title = "Figure 4: Annual Mean NO2 Concentration Distribution by Cluster ID",
+       x = "Average NO2",
+       y = "Density")
+```
+
+```{r o3plot, echo=FALSE}
+ggplot(data = clean_meck) +
+  geom_density(aes(x = avg_o3),
+               lwd = 0.35) +
+  facet_wrap(~ cluster) +
+  theme_bw() +
+  theme(strip.background = element_rect(linewidth = 0.8,
+                                        fill = "white")) +
+  labs(title = "Figure 5: Annual O3 Concentration Distribution by Cluster ID",
+       x = "Average O3",
+       y = "Density")
+```
+
+```{r pm25plot, echo=FALSE}
+ggplot(data = clean_meck) +
+  geom_density(aes(x = avg_pm2_5),
+               lwd = 0.35) +
+  facet_wrap(~ cluster) +
+  theme_bw() +
+  theme(strip.background = element_rect(linewidth = 0.8,
+                                        fill = "white")) +
+  labs(title = "Figure 6: Annual PM2.5 Concentration Distribution by Cluster ID",
+       x = "Average PM2.5",
+       y = "Density")
+```
+
+```{r indexdens, echo=FALSE}
+ggplot(data = clean_meck) +
+  geom_density(aes(x = pollut_index),
+               lwd = 0.35) +
+  facet_wrap(~ cluster) +
+  theme_bw() +
+  theme(strip.background = element_rect(linewidth = 0.8,
+                                        fill = "white")) +
+  labs(title = "Figure 7: Air Pollution Index Distribution by Cluster ID",
+       x = "Air Pollution Index",
+       y = "Density")
+```
+
+The PM2.5 distribution is consistent across clusters. Cluster 4 shows more frequently occurring values on the higher end of the NO2 and O3 spectrum, whereas cluster 7 shows more density of higher values on only the NO2 spectrum. The other clusters do not show a significant skew within any other plot. With the identifying factors of cluster 4, high social vulnerability is associated with a higher level of air pollution; however, cluster 5 also with high social vulnerability did not have as high of an association noticeable in the plots. The high renter rate with low vehicle ownership characterizing cluster 7 could also be associated with higher levels of air pollution through NO2 concentration. The Air Pollution Index shown in Figure 8 further exemplifies the relationship between clusters 4 and 7 with higher relative air pollution values. Cluster 5 is also slightly skewed toward higher values of the Air Pollution Index. In Table 2, aggregate values by cluster also indicate levels of air pollution by cluster. Though the values documented in the table have small differences between them, the higher values of average NO2 concentration are within clusters 4 and 7 while the higher averages of PM2.5 are within clusters 4, 5, and 7. Thus, the identifying factors within these clusters are more distinguishable for the interaction with pollution.
+
+```{r clustertable, echo=FALSE}
+cluster_index <- clean_meck %>% 
+  as.data.frame() %>% 
+  select(cluster, avg_no2, avg_o3, avg_pm2_5) %>% 
+  group_by(cluster) %>% 
+  summarize(avg_no2 = mean(avg_no2),
+            avg_o3 = mean(avg_o3),
+            avg_pm2_5 = mean(avg_pm2_5))
+
+cluster_index %>% 
+  gt() %>% 
+  tab_header("Table 2: Average Annual Pollution by Cluster") %>% 
+  cols_label(cluster = "Cluster",
+             avg_no2 = "Average NO2",
+             avg_o3 = "Average O3",
+             avg_pm2_5 = "Average PM2.5") %>% 
+  fmt_number(columns = starts_with("avg"), decimals = 4) %>% 
+  cols_align(align = "center")
+```
+
+Cluster 4 had a center with multiple values higher than the global mean, but the largest indicators were no internet access, usage of food stamps, disability status, and below 150 poverty level. With its social vulnerability and pollution levels being prevalent as the highest of the other clusters, the indicators of cluster 4 are the most important. Cluster 7 had less social vulnerability but factors of renter-occupied units and no vehicle resemble more urban, inner-city living as augmented by the map in Figure 2. Thereby, the higher pollution could be due to the amount of urbanization and traffic occurring in such areas. Cluster 5 had multiple high indicators of social vulnerability -- specifically limited English proficiency, lack of healthcare insurance, and no high school diploma. Though clusters 4 and 7 had greater levels of pollution, cluster 5 presents a slight skew in the overall Index that affirms its feature importance. The contributing factors defining clusters 4, 7, and 5 express social vulnerability in different ways; as such, they would further represent a stronger correlation with air pollution if there were more variance in pollution levels.
+
+## Conclusions
+
+Clusters with more indicators of social vulnerability have a slight relationship with higher air pollution levels, but there is not enough evidence to state that socioeconomic status is highly correlated with pollution exposure. Thus, the initial hypothesis of this study is not accepted as significantly true. This is due to the pollution measurements in Charlotte-Mecklenburg all being within safety standards regardless of the variance in values. The utilization of an Air Pollution Index allowed a more relative measurement of pollution thereby flagging areas of interest that may bear the burden of environmental risks that occur as a result of changing climate. If more extreme values of air pollution were to occur, based on the current areas of higher relative pollution, important attributes could be used to predict the most distressed census tract.
+
+Further steps could be taken in the expansion of the geodemographic variables; though the chosen attributes were derived from the SVI, more census variables of socioeconomic status could be included [@cdc]. Also, major sources of air pollution were represented by three pollutants in the current study, so the exploration of other major sources of pollution could improve the clustering algorithm while maintaining integrity. Another aspect to air pollution and geodemographics is health risks, so drawing a relationship between the two with more respiratory health data may uncover statistical significance. Though the current study focuses on exploratory analysis, the construction of regression models could further measure the relationship between social vulnerability and air pollution.
+
+## References
